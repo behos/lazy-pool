@@ -1,5 +1,5 @@
 [package]
-name = "pool"
+name = "lazy-pool"
 version = "0.1.0"
 authors = ["Giorgos Georgiou <giorgos.georgiou@outlook.com>"]
 
