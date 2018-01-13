@@ -4,3 +4,6 @@ version = "0.1.0"
 authors = ["Giorgos Georgiou <giorgos.georgiou@outlook.com>"]
 
 [dependencies]
+
+[dev-dependencies]
+uuid = { version = "*", features = ["v4"] }
