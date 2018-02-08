@@ -2,8 +2,12 @@
 name = "lazy-pool"
 version = "0.1.0"
 authors = ["Giorgos Georgiou <giorgos.georgiou@outlook.com>"]
+description = "Experimental lazy object pool"
+repository = "https://github.com/behos/korat"
+license = "Apache-2.0"
 
 [dependencies]
+futures = "0.1.18"
 
 [dev-dependencies]
 uuid = { version = "*", features = ["v4"] }
