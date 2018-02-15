@@ -40,7 +40,7 @@ impl<T> Pool<T> {
         }
     }
 
-    pub fn get(&mut self) -> FuturePooled<T> {
+    pub fn get(&self) -> FuturePooled<T> {
         FuturePooled {
             pool: self.clone(),
             taken: false,
@@ -158,7 +158,7 @@ mod tests {
 
     #[test]
     fn can_get_object_from_pool() {
-        let mut pool = Pool::new(10, || AnyObject { member: String::from("member") });
+        let pool = Pool::new(10, || AnyObject { member: String::from("member") });
         assert_eq!(
             AnyObject { member: String::from("member") },
             *pool.get().wait().unwrap()
@@ -167,13 +167,13 @@ mod tests {
 
     #[test]
     fn can_get_multiple_objects_from_pool() {
-        let mut pool = Pool::new(10, AnyObject::new);
+        let pool = Pool::new(10, AnyObject::new);
         assert!(*pool.get().wait().unwrap() != *pool.get().wait().unwrap());
     }
 
     #[test]
     fn item_is_relased_back_to_the_start_of_the_pool_when_dropped() {
-        let mut pool = Pool::new(10, AnyObject::new);
+        let pool = Pool::new(10, AnyObject::new);
         let member_name_1 = (*pool.get().wait().unwrap()).member.clone();
         let member_name_2 = (*pool.get().wait().unwrap()).member.clone();
         let member_name_3 = (*pool.get().wait().unwrap()).member.clone();
@@ -194,7 +194,7 @@ mod tests {
                 let pool = local_pool.get();
                 let value = pool.wait().unwrap().member.clone();
                 local_members.lock().unwrap().insert(value);
-                thread::sleep(Duration::from_millis(200));
+                thread::sleep(Duration::from_millis(500));
             });
             handles.push(handle);
         }
@@ -206,7 +206,7 @@ mod tests {
 
     #[test]
     fn additional_polls_need_to_wait_for_the_pooled_item_to_be_freed() {
-        let mut pool = Pool::new(1, AnyObject::new);
+        let pool = Pool::new(1, AnyObject::new);
         let mut first = pool.get();
         let mut second = pool.get();
 
@@ -236,7 +236,7 @@ mod tests {
 
     #[test]
     fn polls_on_consumed_future_raise_error() {
-        let mut pool = Pool::new(1, AnyObject::new);
+        let pool = Pool::new(1, AnyObject::new);
         let mut first = pool.get();
         match first.poll() {
             Ok(Async::NotReady) => None,
