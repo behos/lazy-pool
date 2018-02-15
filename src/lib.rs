@@ -1,7 +1,7 @@
 #![feature(box_syntax)]
 
 extern crate futures;
-mod errors;
+pub mod errors;
 
 use std::collections::LinkedList;
 use std::ops::Deref;
