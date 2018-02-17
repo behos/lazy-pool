@@ -1,8 +1,14 @@
 #![feature(box_syntax, universal_impl_trait)]
+#![feature(proc_macro, conservative_impl_trait, generators)]
 
 #[macro_use]
 extern crate log;
+
+#[cfg(not(test))]
 extern crate futures;
+
+#[cfg(test)]
+extern crate futures_await as futures;
 
 pub mod errors;
 
@@ -169,13 +175,16 @@ mod tests {
     extern crate uuid;
 
     use std::thread;
+    use std::iter::FromIterator;
     use std::collections::HashSet;
     use std::time::Duration;
     use std::sync::{Arc, Mutex};
 
     use futures::Future;
+    use futures::prelude::*;
 
     use super::Pool;
+    use errors::PoolError;
 
     #[derive(PartialEq, Debug)]
     struct AnyObject {
@@ -248,5 +257,46 @@ mod tests {
             AnyObject { member: String::from("hello") },
             *pool.get().wait().unwrap()
         );
+    }
+
+    struct AsyncPoolHolder {
+        pool: Pool<AnyObject>,
+    }
+
+    impl AsyncPoolHolder {
+        fn new() -> Self {
+            Self { pool: Pool::new(3, box || AnyObject::new()) }
+        }
+
+        #[async]
+        fn get_member_value(self) -> Result<Vec<String>, PoolError> {
+            let mut values = vec![];
+            let object = await!(self.pool.get())?;
+            {
+                let object_2 = await!(self.pool.get())?;
+                let object_3 = await!(self.pool.get())?;
+                values.push(object.member.clone());
+                values.push(object_2.member.clone());
+                values.push(object_3.member.clone());
+            }
+            let object_4 = await!(self.pool.get())?;
+            let object_5 = await!(self.pool.get())?;
+            values.push(object_4.member.clone());
+            values.push(object_5.member.clone());
+            Ok(values)
+        }
+    }
+
+    #[test]
+    fn can_run_in_async() {
+
+        let holder = AsyncPoolHolder::new();
+        let task =
+            async_block!{
+                await!(holder.get_member_value())
+            };
+        let res = task.wait().unwrap();
+        let set: HashSet<String> = HashSet::from_iter(res.iter().cloned());
+        assert_eq!(3, set.len())
     }
 }
