@@ -144,7 +144,7 @@ impl<T> Future for FuturePooled<T> {
     type Item = Pooled<T>;
     type Error = PoolError;
 
-    fn poll<'a>(&'a mut self) -> Poll<Self::Item, Self::Error> {
+    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
         debug!("Polling pooled item");
         if self.taken {
             Err(PoolError::PollError)
