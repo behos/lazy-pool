@@ -8,6 +8,10 @@ See tests for examples of usage
 
 # Release Notes
 
+## 0.2.1
+
+* Minor fixes and switch to VecDeque
+
 ## 0.2.0
 
 * Deprecated all previous version due to misusing Future trait

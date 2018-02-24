@@ -1,6 +1,6 @@
 [package]
 name = "lazy-pool"
-version = "0.2.0"
+version = "0.2.1"
 authors = ["Giorgos Georgiou <giorgos.georgiou@outlook.com>"]
 description = "Experimental lazy object pool"
 repository = "https://github.com/behos/lazy-pool"
