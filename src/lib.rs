@@ -12,7 +12,7 @@ extern crate futures_await as futures;
 
 pub mod errors;
 
-use std::collections::LinkedList;
+use std::collections::VecDeque;
 use std::fmt::{Debug, Formatter, Error as FmtError};
 use std::ops::Deref;
 use std::sync::{Arc, Mutex};
@@ -26,7 +26,7 @@ use errors::PoolError;
 struct SharedPool<T> {
     size: usize,
     created: usize,
-    pooled_items: LinkedList<T>,
+    pooled_items: VecDeque<T>,
     factory: Box<Fn() -> T + Send + Sync>,
 }
 
@@ -44,18 +44,18 @@ impl<T> Debug for SharedPool<T> {
 #[derive(Debug)]
 pub struct Pool<T> {
     shared_pool: Arc<Mutex<SharedPool<T>>>,
-    tasks: Arc<Mutex<LinkedList<Task>>>,
+    tasks: Arc<Mutex<VecDeque<Task>>>,
 }
 
 
 impl<T> Pool<T> {
     pub fn new(size: usize, factory: Box<Fn() -> T + Send + Sync>) -> Self {
         Pool {
-            tasks: Arc::new(Mutex::new(LinkedList::new())),
+            tasks: Arc::new(Mutex::new(VecDeque::new())),
             shared_pool: Arc::new(Mutex::new(SharedPool {
                 size: size,
                 created: 0,
-                pooled_items: LinkedList::new(),
+                pooled_items: VecDeque::new(),
                 factory: factory,
             })),
         }
