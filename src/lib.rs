@@ -1,6 +1,13 @@
 #![feature(box_syntax, universal_impl_trait)]
 #![feature(proc_macro, conservative_impl_trait, generators)]
 
+//! Through lazy-pool you can create generic object pools which are lazily intitialized
+//! and use a performant deque in order to provide instances of the pooled objects
+
+//! The pool can be used in a threaded environment as well as an async environment
+//! See Pool documentation for more info
+
+
 #[macro_use]
 extern crate log;
 
@@ -49,6 +56,22 @@ pub struct Pool<T> {
 
 
 impl<T> Pool<T> {
+    /// Default constructor for the Pool object:
+    ///
+    /// ```
+    /// # extern crate lazy_pool;
+    ///
+    /// # use lazy_pool::Pool;
+    ///
+    /// # struct AnyObject;
+    ///
+    /// # fn main() {
+    /// let pool = Pool::new(10, Box::new(|| AnyObject));
+    /// # }
+    /// ```
+    ///
+    /// The pool requires an object factory in order to be able to provide lazy
+    /// initialization for objects.
     pub fn new(size: usize, factory: Box<Fn() -> T + Send + Sync>) -> Self {
         Pool {
             tasks: Arc::new(Mutex::new(VecDeque::new())),
@@ -61,6 +84,23 @@ impl<T> Pool<T> {
         }
     }
 
+    /// To get an object out of the pool use get. This will return a future
+    /// so you either need to wait() on it or to use it in an async manner
+    ///
+    /// ```
+    /// # extern crate lazy_pool;
+    /// # extern crate futures;
+    ///
+    /// # use futures::Future;
+    /// # use lazy_pool::Pool;
+    ///
+    /// # struct AnyObject;
+    ///
+    /// # fn main() {
+    /// # let pool = Pool::new(10, Box::new(|| AnyObject));
+    /// let object = pool.get().wait().unwrap();
+    /// # }
+    /// ```
     pub fn get(&self) -> FuturePooled<T> {
         FuturePooled {
             pool: self.clone(),
