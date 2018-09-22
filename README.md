@@ -1,5 +1,7 @@
 # Lazy Pool
 
+[![Build Status](https://travis-ci.org/behos/lazy-pool.svg?branch=master)](https://travis-ci.org/behos/lazy-pool)
+
 A lazy-initialized object pool. Provides a sharable pool where objects
 are initialized on demand. The pool works by providing Futures which allow
 for usage with async/await (untested) and threading as well.
