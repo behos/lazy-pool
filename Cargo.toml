@@ -1,10 +1,11 @@
 [package]
 name = "lazy-pool"
-version = "0.2.2"
+version = "0.2.3"
 authors = ["Giorgos Georgiou <giorgos.georgiou@outlook.com>"]
 description = "Experimental lazy object pool"
 repository = "https://github.com/behos/lazy-pool"
 license = "Apache-2.0"
+readme = "./README.md"
 
 [dependencies]
 futures = "~0.1"
@@ -12,5 +13,3 @@ log = "~0"
 
 [dev-dependencies]
 uuid = { version = "~0", features = ["v4"] }
-tokio = { version = "0.1.1" }
-futures-await = "0.1"

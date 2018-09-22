@@ -1,6 +1,3 @@
-#![feature(box_syntax, universal_impl_trait)]
-#![feature(proc_macro, conservative_impl_trait, generators)]
-
 //! Through lazy-pool you can create generic object pools which are lazily intitialized
 //! and use a performant deque in order to provide instances of the pooled objects
 
@@ -11,17 +8,13 @@
 #[macro_use]
 extern crate log;
 
-#[cfg(not(test))]
 extern crate futures;
-
-#[cfg(test)]
-extern crate futures_await as futures;
 
 pub mod errors;
 
 use std::collections::VecDeque;
 use std::fmt::{Debug, Formatter, Error as FmtError};
-use std::ops::Deref;
+use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, Mutex};
 
 use futures::{Future, Async, Poll};
@@ -166,6 +159,13 @@ impl<T> Drop for Pooled<T> {
 }
 
 
+impl<T> DerefMut for Pooled<T> {
+
+    fn deref_mut(&mut self) -> &mut T {
+        self.wrapped.as_mut().unwrap()
+    }
+}
+
 impl<T> Deref for Pooled<T> {
     type Target = T;
 
@@ -221,7 +221,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use futures::Future;
-    use futures::prelude::*;
+    use futures::future;
 
     use super::Pool;
     use errors::PoolError;
@@ -243,7 +243,8 @@ mod tests {
 
     #[test]
     fn can_get_object_from_pool() {
-        let pool = Pool::new(10, box || AnyObject { member: String::from("member") });
+        let pool = Pool::new(
+            10, Box::new(|| AnyObject { member: String::from("member") }));
         assert_eq!(
             AnyObject { member: String::from("member") },
             *pool.get().wait().unwrap()
@@ -252,13 +253,13 @@ mod tests {
 
     #[test]
     fn can_get_multiple_objects_from_pool() {
-        let pool = Pool::new(10, box AnyObject::new);
+        let pool = Pool::new(10, Box::new(AnyObject::new));
         assert!(*pool.get().wait().unwrap() != *pool.get().wait().unwrap());
     }
 
     #[test]
     fn item_is_relased_back_to_the_start_of_the_pool_when_dropped() {
-        let pool = Pool::new(10, box AnyObject::new);
+        let pool = Pool::new(10, Box::new(AnyObject::new));
         let member_name_1 = (*pool.get().wait().unwrap()).member.clone();
         let member_name_2 = (*pool.get().wait().unwrap()).member.clone();
         let member_name_3 = (*pool.get().wait().unwrap()).member.clone();
@@ -268,7 +269,7 @@ mod tests {
 
     #[test]
     fn can_share_pool_between_threads() {
-        let pool = Pool::new(3, box || AnyObject::new());
+        let pool = Pool::new(3, Box::new(|| AnyObject::new()));
         let members = Arc::new(Mutex::new(HashSet::<String>::new()));
         let mut handles = vec![];
 
@@ -292,7 +293,7 @@ mod tests {
     #[test]
     fn can_use_closure_as_factory() {
         let context = "hello";
-        let pool = Pool::new(10, box move || AnyObject::with_context(context));
+        let pool = Pool::new(10, Box::new(move || AnyObject::with_context(context)));
         assert_eq!(
             AnyObject { member: String::from("hello") },
             *pool.get().wait().unwrap()
@@ -305,24 +306,27 @@ mod tests {
 
     impl AsyncPoolHolder {
         fn new() -> Self {
-            Self { pool: Pool::new(3, box || AnyObject::new()) }
+            Self { pool: Pool::new(3, Box::new(|| AnyObject::new())) }
         }
 
-        #[async]
         fn get_member_value(self) -> Result<Vec<String>, PoolError> {
             let mut values = vec![];
-            let object = await!(self.pool.get())?;
-            {
-                let object_2 = await!(self.pool.get())?;
-                let object_3 = await!(self.pool.get())?;
-                values.push(object.member.clone());
+            self.pool.get().then(|object| {
+                let object_2 = self.pool.get().wait().unwrap();
+                let object_3 = self.pool.get().wait().unwrap();
+                values.push(object.unwrap().member.clone());
                 values.push(object_2.member.clone());
                 values.push(object_3.member.clone());
-            }
-            let object_4 = await!(self.pool.get())?;
-            let object_5 = await!(self.pool.get())?;
-            values.push(object_4.member.clone());
-            values.push(object_5.member.clone());
+                future::ok(())
+            }).wait()?;
+
+            self.pool.get().then(|_object| {
+                let object_4 = self.pool.get().wait().unwrap();
+                let object_5 = self.pool.get().wait().unwrap();
+                values.push(object_4.member.clone());
+                values.push(object_5.member.clone());
+                future::ok(())
+            }).wait()?;
             Ok(values)
         }
     }
@@ -331,12 +335,30 @@ mod tests {
     fn can_run_in_async() {
 
         let holder = AsyncPoolHolder::new();
-        let task =
-            async_block!{
-                await!(holder.get_member_value())
-            };
-        let res = task.wait().unwrap();
+        let res = holder.get_member_value().unwrap();
         let set: HashSet<String> = HashSet::from_iter(res.iter().cloned());
         assert_eq!(3, set.len())
+    }
+
+    #[test]
+    fn can_mutate_polled_items() {
+        struct Mutable {
+            count: i32
+        }
+
+        let pool = Pool::new(2, Box::new(|| Mutable { count: 0 }));
+
+        let res: Result<(), PoolError> = pool.get().then(|object| {
+            let mut o = object.unwrap();
+            o.count += 1;
+            future::ok(())
+        }).wait();
+
+        let item_1 = pool.get().wait().unwrap();
+        let item_2 = pool.get().wait().unwrap();
+
+        assert!(res.is_ok());
+        assert_eq!(1, item_1.count);
+        assert_eq!(0, item_2.count);
     }
 }

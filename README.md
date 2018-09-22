@@ -8,6 +8,10 @@ See tests for examples of usage
 
 # Release Notes
 
+## 0.2.3
+
+* Introduce mutable dereferencing
+
 ## 0.2.1
 
 * Minor fixes and switch to VecDeque
