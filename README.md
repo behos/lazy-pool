@@ -10,6 +10,10 @@ See tests for examples of usage
 
 # Release Notes
 
+## 1.0.0
+
+* Migrate to std futures.
+
 ## 0.2.3
 
 * Introduce mutable dereferencing
