@@ -60,10 +60,10 @@ impl<T> Pool<T> {
         Pool {
             tasks: Arc::new(Mutex::new(VecDeque::new())),
             shared_pool: Arc::new(Mutex::new(SharedPool {
-                size: size,
+                size,
                 created: 0,
                 pooled_items: VecDeque::new(),
-                factory: factory,
+                factory,
             })),
         }
     }
@@ -77,10 +77,8 @@ impl<T> Pool<T> {
     ///
     /// # struct AnyObject;
     ///
-    /// # fn main() {
     /// # let pool = Pool::new(10, Box::new(|| AnyObject));
     /// let object = block_on(async { pool.get().await });
-    /// # }
     /// ```
     pub fn get(&self) -> FuturePooled<T> {
         FuturePooled { pool: self.clone() }
@@ -133,9 +131,8 @@ pub struct Pooled<T> {
 
 impl<T> Drop for Pooled<T> {
     fn drop(&mut self) {
-        match self.wrapped.take() {
-            Some(item) => self.pool.release(item),
-            None => (),
+        if let Some(item) = self.wrapped.take() {
+            self.pool.release(item)
         }
     }
 }
