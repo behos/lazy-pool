@@ -84,9 +84,15 @@ impl<T> Pool<T> {
         FuturePooled { pool: self.clone() }
     }
 
-    fn release(&mut self, item: T) {
+    fn release(&mut self, item: T, tainted: bool) {
         let mut shared_pool = self.shared_pool.lock().unwrap();
-        shared_pool.pooled_items.push_front(item);
+        if tainted {
+            debug!("Dropping tainted item");
+            shared_pool.created -= 1;
+        } else {
+            shared_pool.pooled_items.push_front(item);
+        }
+
         if let Some(task) = self.tasks.lock().unwrap().pop_front() {
             debug!("Notifying waiting task: {:?}", shared_pool);
             task.wake()
@@ -112,6 +118,10 @@ impl<T> Pool<T> {
             }
         }
     }
+
+    pub fn created(&self) -> usize {
+        self.shared_pool.lock().unwrap().created
+    }
 }
 
 impl<T> Clone for Pool<T> {
@@ -127,12 +137,19 @@ impl<T> Clone for Pool<T> {
 pub struct Pooled<T> {
     pool: Pool<T>,
     wrapped: Option<T>,
+    tainted: bool,
+}
+
+impl<T> Pooled<T> {
+    pub fn tainted(&mut self) {
+        self.tainted = true;
+    }
 }
 
 impl<T> Drop for Pooled<T> {
     fn drop(&mut self) {
         if let Some(item) = self.wrapped.take() {
-            self.pool.release(item)
+            self.pool.release(item, self.tainted)
         }
     }
 }
@@ -166,6 +183,7 @@ impl<T> Future for FuturePooled<T> {
                 Poll::Ready(Pooled {
                     pool: self.pool.clone(),
                     wrapped: Some(object),
+                    tainted: false,
                 })
             }
             None => {
@@ -351,5 +369,27 @@ mod tests {
             assert_eq!(1, item_1.count);
             assert_eq!(0, item_2.count);
         })
+    }
+
+    #[test]
+    fn marking_item_as_tainted_drops_it_from_pool() {
+        let pool = Pool::new(1, Box::new(AnyObject::new));
+
+        block_on(async {
+            let mut item_val = String::new();
+            {
+                let item = pool.get().await;
+                item_val += &item.member;
+            }
+            {
+                let mut item = pool.get().await;
+                assert!(item_val == item.member);
+                Pooled::tainted(&mut item);
+            }
+            {
+                let item = pool.get().await;
+                assert!(item_val != item.member);
+            }
+        });
     }
 }
