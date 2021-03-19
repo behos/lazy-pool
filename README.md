@@ -10,6 +10,10 @@ See tests for examples of usage
 
 # Release Notes
 
+## 1.1.0
+
+* Allow marking an object as tainted through the `Pooled` wrapper. This drops the item from the pool instead of releasing it.
+
 ## 1.0.0
 
 * Migrate to std futures.
