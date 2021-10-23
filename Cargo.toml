@@ -1,12 +1,12 @@
 [package]
 name = "lazy-pool"
-version = "1.1.0"
+version = "1.2.0"
 authors = ["Giorgos Georgiou <giorgos.georgiou@outlook.com>"]
 description = "Experimental lazy object pool"
 repository = "https://github.com/behos/lazy-pool"
 license = "Apache-2.0"
 readme = "./README.md"
-edition = "2018"
+edition = "2021"
 
 [dependencies]
 log = "~0"
