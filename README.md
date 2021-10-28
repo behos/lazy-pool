@@ -1,6 +1,6 @@
 # Lazy Pool
 
-[![Build Status](https://travis-ci.org/behos/lazy-pool.svg?branch=master)](https://travis-ci.org/behos/lazy-pool)
+![Build Status](https://github.com/behos/lazy-pool/actions/workflows/rust.yml/badge.svg)
 
 A lazy-initialized object pool. Provides a sharable pool where objects
 are initialized on demand. The pool works by providing Futures which allow
