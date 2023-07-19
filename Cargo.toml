@@ -1,6 +1,6 @@
 [package]
 name = "lazy-pool"
-version = "1.2.0"
+version = "2.0.0"
 authors = ["Giorgos Georgiou <giorgos.georgiou@outlook.com>"]
 description = "Experimental lazy object pool"
 repository = "https://github.com/behos/lazy-pool"
@@ -10,7 +10,12 @@ edition = "2021"
 
 [dependencies]
 log = "~0"
+futures = "0.3"
+thiserror = "1.0.43"
 
 [dev-dependencies]
 uuid = { version = "~0", features = ["v4"] }
-futures = "0.3"
+test-log = "0.2.12"
+env_logger = "0.10.0"
+tokio = { version = "1.29.1", features = ["macros", "rt"] }
+futures-timer = "3.0.2"

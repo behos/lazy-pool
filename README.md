@@ -10,6 +10,15 @@ See tests for examples of usage
 
 # Release Notes
 
+## 2.0.0
+
+* Reworked most of the package to make it async-first. Having the factory methods being synchronous would force switching
+  from async - to sync - to async which didn't work in many cases.
+  The interface changed significantly.
+* Locking is now using async-aware mutexes.
+* Releasing objects back to the pool needs to be done outside of Drop (until AsyncDrop becomes a thing). Introduced a `get`
+  macro to be used as the main means of acquiring and using an item.
+
 ## 1.1.0
 
 * Allow marking an object as tainted through the `Pooled` wrapper. This drops the item from the pool instead of releasing it.

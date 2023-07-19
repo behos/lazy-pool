@@ -4,198 +4,181 @@
 //! The pool can be used in a threaded environment as well as an async environment
 //! See Pool documentation for more info
 
-use log::debug;
+mod error;
+mod factory;
+
+use error::LazyPoolError;
+pub use factory::{Factory, SyncFactory};
+use log::{debug, warn};
 use std::{
-    collections::VecDeque,
-    fmt::{Debug, Error as FmtError, Formatter},
-    future::Future,
     ops::{Deref, DerefMut},
-    pin::Pin,
-    sync::{Arc, Mutex},
-    task::{Context, Poll, Waker},
+    sync::Arc,
 };
 
-struct SharedPool<T> {
-    size: usize,
-    created: usize,
-    pooled_items: VecDeque<T>,
-    factory: Box<dyn Fn() -> T + Send + Sync>,
+pub use error::Result;
+
+use futures::{channel::mpsc, lock::Mutex, select_biased, SinkExt, StreamExt};
+
+#[macro_export]
+macro_rules! get {
+    ($item:ident = $pool:expr => $block:expr) => {{
+        #[allow(unused_mut)]
+        let mut $item = $pool.get().await;
+        let res = $block;
+        if let Err(err) = $item.release().await {
+            ::log::error!("failed to release object: {err:?}");
+        }
+        res
+    }};
 }
 
-impl<T> Debug for SharedPool<T> {
-    fn fmt(&self, fmt: &mut Formatter) -> Result<(), FmtError> {
-        write!(
-            fmt,
-            "SharedPool(available: {}, total: {})",
-            self.pooled_items.len(),
-            self.created
-        )
+pub struct Pool<T: Send> {
+    factory: Arc<Mutex<Box<dyn Factory<T>>>>,
+    return_receiver: Arc<Mutex<mpsc::Receiver<T>>>,
+    create_receiver: Arc<Mutex<mpsc::Receiver<()>>>,
+    return_sender: mpsc::Sender<T>,
+    create_sender: mpsc::Sender<()>,
+}
+
+impl<T: Send + 'static> Pool<T> {
+    /**
+    Default constructor for the Pool object:
+
+    ```
+    # extern crate lazy_pool;
+
+    # use lazy_pool::Pool;
+    # use futures::executor::block_on;
+
+    # struct AnyObject;
+
+    # fn main() {
+    let pool = block_on(async { Pool::new(10, Box::new(|| AnyObject)).await.unwrap() });
+    # }
+    ```
+
+    The pool requires an object factory in order to be able to provide lazy
+    initialization for objects.
+    Any synchronous closure can be used to create a SyncFactory.
+    */
+    pub async fn new<F>(size: usize, factory: F) -> Result<Self>
+    where
+        SyncFactory<T>: From<F>,
+    {
+        Self::new_with_factory(size, SyncFactory::from(factory)).await
     }
-}
 
-#[derive(Debug)]
-pub struct Pool<T> {
-    shared_pool: Arc<Mutex<SharedPool<T>>>,
-    tasks: Arc<Mutex<VecDeque<Waker>>>,
-}
+    /**
+    Creating a Pool instance with a [`Factory`]
+    Check [`Factory`] docs for an example of creating an async factory.
+    */
+    pub async fn new_with_factory<F>(size: usize, factory: F) -> Result<Self>
+    where
+        F: Factory<T> + 'static,
+    {
+        let (mut create_sender, create_receiver) = mpsc::channel(size);
+        let (return_sender, return_receiver) = mpsc::channel(size);
+        for _ in 0..size {
+            create_sender.send(()).await?;
+        }
+        Ok(Pool {
+            create_sender,
+            return_sender,
+            create_receiver: Arc::new(Mutex::new(create_receiver)),
+            return_receiver: Arc::new(Mutex::new(return_receiver)),
+            factory: Arc::new(Mutex::new(Box::new(factory))),
+        })
+    }
 
-impl<T> Pool<T> {
-    /// Default constructor for the Pool object:
-    ///
-    /// ```
-    /// # extern crate lazy_pool;
-    ///
-    /// # use lazy_pool::Pool;
-    ///
-    /// # struct AnyObject;
-    ///
-    /// # fn main() {
-    /// let pool = Pool::new(10, Box::new(|| AnyObject));
-    /// # }
-    /// ```
-    ///
-    /// The pool requires an object factory in order to be able to provide lazy
-    /// initialization for objects.
-    pub fn new(size: usize, factory: Box<dyn Fn() -> T + Send + Sync>) -> Self {
-        Pool {
-            tasks: Arc::new(Mutex::new(VecDeque::new())),
-            shared_pool: Arc::new(Mutex::new(SharedPool {
-                size,
-                created: 0,
-                pooled_items: VecDeque::new(),
-                factory,
-            })),
+    /**
+    To get an object out of the pool use get. This will return a future
+    so you either need to await on it or to use it in an async manner
+
+    ```
+    # use futures::executor::block_on;
+    # use lazy_pool::{Pool, Pooled, get};
+
+    # struct AnyObject;
+
+
+    let object = block_on(async {
+        let pool = Pool::new(10, Box::new(|| AnyObject)).await.unwrap();
+        get!(object = pool => {
+            // Object was retrieved and assigned to `object`. It will be put back at
+            // the end of this block, unless it's marked as tainted.
+            Pooled::tainted(&mut object);
+        });
+    });
+    ```
+    */
+    pub async fn get(&self) -> Pooled<T> {
+        debug!("getting item");
+        let object = self.next_available().await;
+        Pooled {
+            wrapped: Some(object),
+            tainted: false,
+            create_sender: self.create_sender.clone(),
+            return_sender: self.return_sender.clone(),
         }
     }
 
-    /// To get an object out of the pool use get. This will return a future
-    /// so you either need to await on it or to use it in an async manner
-    ///
-    /// ```
-    /// # use futures::executor::block_on;
-    /// # use lazy_pool::Pool;
-    ///
-    /// # struct AnyObject;
-    ///
-    /// # let pool = Pool::new(10, Box::new(|| AnyObject));
-    /// let object = block_on(async { pool.get().await });
-    /// ```
-    pub fn get(&self) -> FuturePooled<T> {
-        FuturePooled { pool: self.clone() }
-    }
-
-    fn release(&mut self, item: T, tainted: bool) {
-        let mut shared_pool = self.shared_pool.lock().unwrap();
-        if tainted {
-            debug!("Dropping tainted item");
-            shared_pool.created -= 1;
-        } else {
-            shared_pool.pooled_items.push_front(item);
-        }
-
-        if let Some(task) = self.tasks.lock().unwrap().pop_front() {
-            debug!("Notifying waiting task: {:?}", shared_pool);
-            task.wake()
-        }
-        debug!("Releasing: {:?}", shared_pool);
-    }
-
-    fn get_if_available(&mut self) -> Option<T> {
-        let mut shared_pool = self.shared_pool.lock().unwrap();
-        match shared_pool.pooled_items.pop_front() {
-            Some(object) => {
-                debug!("Acquiring: {:?}", shared_pool);
-                Some(object)
+    async fn next_available(&self) -> T {
+        let mut return_receiver = self.return_receiver.lock().await;
+        let mut create_receiver = self.create_receiver.lock().await;
+        select_biased! {
+            item = return_receiver.next() => {
+                debug!("using returned object");
+                item.expect("whoops")
+            },
+            _ = create_receiver.next() => {
+                debug!("creating object");
+                self.create().await
             }
-            None => {
-                if shared_pool.created < shared_pool.size {
-                    shared_pool.created += 1;
-                    debug!("Creating: {:?}", shared_pool);
-                    Some((shared_pool.factory)())
-                } else {
-                    None
-                }
-            }
         }
     }
 
-    pub fn created(&self) -> usize {
-        self.shared_pool.lock().unwrap().created
+    async fn create(&self) -> T {
+        self.factory.lock().await.produce().await
     }
 }
 
-impl<T> Clone for Pool<T> {
-    fn clone(&self) -> Self {
-        Pool {
-            shared_pool: self.shared_pool.clone(),
-            tasks: self.tasks.clone(),
-        }
-    }
-}
-
-#[derive(Debug)]
-pub struct Pooled<T> {
-    pool: Pool<T>,
+pub struct Pooled<T: Send + 'static> {
     wrapped: Option<T>,
     tainted: bool,
+    return_sender: mpsc::Sender<T>,
+    create_sender: mpsc::Sender<()>,
 }
 
-impl<T> Pooled<T> {
+impl<T: Send> Pooled<T> {
     pub fn tainted(&mut self) {
         self.tainted = true;
     }
-}
 
-impl<T> Drop for Pooled<T> {
-    fn drop(&mut self) {
-        if let Some(item) = self.wrapped.take() {
-            self.pool.release(item, self.tainted)
+    pub async fn release(mut self) -> Result<()> {
+        debug!("releasing object (tainted = {})", self.tainted);
+        match (self.tainted, self.wrapped.take()) {
+            (_, None) => {
+                warn!("release called multiple times");
+                Ok(())
+            }
+            (true, _) => self.create_sender.send(()).await,
+            (false, Some(item)) => self.return_sender.send(item).await,
         }
+        .map_err(|_| LazyPoolError::Release)
     }
 }
 
-impl<T> DerefMut for Pooled<T> {
+impl<T: Send> DerefMut for Pooled<T> {
     fn deref_mut(&mut self) -> &mut T {
         self.wrapped.as_mut().unwrap()
     }
 }
 
-impl<T> Deref for Pooled<T> {
+impl<T: Send> Deref for Pooled<T> {
     type Target = T;
 
     fn deref(&self) -> &T {
         self.wrapped.as_ref().unwrap()
-    }
-}
-
-pub struct FuturePooled<T> {
-    pool: Pool<T>,
-}
-
-impl<T> Future for FuturePooled<T> {
-    type Output = Pooled<T>;
-
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
-        debug!("Polling pooled item");
-        match self.pool.get_if_available() {
-            Some(object) => {
-                debug!("Pooled item ready!");
-                Poll::Ready(Pooled {
-                    pool: self.pool.clone(),
-                    wrapped: Some(object),
-                    tainted: false,
-                })
-            }
-            None => {
-                self.pool
-                    .tasks
-                    .lock()
-                    .unwrap()
-                    .push_front(cx.waker().clone());
-                debug!("Pooled item not Ready! Enqueueing task");
-                Poll::Pending
-            }
-        }
     }
 }
 
@@ -206,16 +189,20 @@ mod tests {
 
     use super::*;
 
-    use futures::executor::block_on;
+    use futures::{executor::block_on, select, Future, FutureExt};
+    use futures_timer::Delay;
+    use log::debug;
     use std::{
         collections::HashSet,
         iter::FromIterator,
-        sync::{Arc, Mutex},
+        sync::{Arc, Mutex as SyncMutex},
         thread,
         time::Duration,
     };
+    use test_log::test;
+    use tokio::task::JoinSet;
 
-    #[derive(PartialEq, Debug)]
+    #[derive(PartialEq, Debug, Clone)]
     struct AnyObject {
         member: String,
     }
@@ -234,58 +221,83 @@ mod tests {
         }
     }
 
-    #[test]
-    fn can_get_object_from_pool() {
+    #[test(tokio::test)]
+    async fn can_get_object_from_pool() {
         let pool = Pool::new(
             10,
             Box::new(|| AnyObject {
                 member: String::from("member"),
             }),
-        );
-        block_on(async {
-            assert_eq!(
-                AnyObject {
-                    member: String::from("member")
-                },
-                *pool.get().await
-            )
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            AnyObject {
+                member: String::from("member")
+            },
+            get!(item = pool => (*item).clone())
+        )
+    }
+
+    #[test(tokio::test)]
+    async fn can_get_multiple_objects_from_pool() {
+        let pool = Pool::new(10, Box::new(AnyObject::new)).await.unwrap();
+        get!(item_1 = pool => {
+            get!(item_2 = pool => {
+                assert!(*item_1 != *item_2);
+            })
         })
     }
 
-    #[test]
-    fn can_get_multiple_objects_from_pool() {
-        let pool = Pool::new(10, Box::new(AnyObject::new));
-        block_on(async {
-            assert!(*pool.get().await != *pool.get().await);
-        })
+    #[test(tokio::test)]
+    async fn item_is_relased_back_to_the_start_of_the_pool_when_dropped() {
+        let pool = Pool::new(10, Box::new(AnyObject::new)).await.unwrap();
+        let member_name_1 = get!(item = pool => item.member.clone());
+        let member_name_2 = get!(item = pool => item.member.clone());
+        let member_name_3 = get!(item = pool => item.member.clone());
+        assert_eq!(member_name_1, member_name_2);
+        assert_eq!(member_name_2, member_name_3);
+    }
+
+    #[test(tokio::test)]
+    async fn pool_does_not_go_over_capacity_when_running_out_of_items() {
+        let pool = Pool::new(2, Box::new(AnyObject::new)).await.unwrap();
+        get!(item_1 = pool => {
+            get!(item_2 = pool => {
+                let mut timeout = Delay::new(Duration::from_millis(100)).fuse();
+                select! {
+                    _ = pool.get().fuse() => panic!("should not be able to get this"),
+                    _ = timeout => {}
+                }
+            });
+            let mut timeout = Delay::new(Duration::from_millis(100)).fuse();
+            select! {
+                _ = pool.get().fuse() => {},
+                _ = timeout => panic!("should be able to get this"),
+            }
+        });
     }
 
     #[test]
-    fn item_is_relased_back_to_the_start_of_the_pool_when_dropped() {
-        let pool = Pool::new(10, Box::new(AnyObject::new));
-        block_on(async {
-            let member_name_1 = (*pool.get().await).member.clone();
-            let member_name_2 = (*pool.get().await).member.clone();
-            let member_name_3 = (*pool.get().await).member.clone();
-            assert_eq!(member_name_1, member_name_2);
-            assert_eq!(member_name_2, member_name_3);
-        })
-    }
-
-    #[test]
-    fn can_share_pool_between_threads() {
-        let pool = Pool::new(3, Box::new(|| AnyObject::new()));
-        let members = Arc::new(Mutex::new(HashSet::<String>::new()));
+    fn can_share_pool_between_threads_in_sync_code() {
+        let pool = Arc::new(block_on(async {
+            Pool::new(3, Box::new(|| AnyObject::new())).await.unwrap()
+        }));
+        let members = Arc::new(SyncMutex::new(HashSet::<String>::new()));
         let mut handles = vec![];
 
         for _ in 1..10 {
             let local_pool = pool.clone();
             let local_members = members.clone();
             let handle = thread::spawn(move || {
-                let pool = block_on(async { local_pool.get().await });
-                let value = pool.member.clone();
+                let value = block_on(async {
+                    get!(item = local_pool => {
+                        Delay::new(Duration::from_millis(100)).await;
+                        item.member.clone()
+                    })
+                });
+                debug!("adding value to members");
                 local_members.lock().unwrap().insert(value);
-                thread::sleep(Duration::from_millis(200));
             });
             handles.push(handle);
         }
@@ -295,18 +307,45 @@ mod tests {
         assert_eq!(members.lock().unwrap().len(), 3);
     }
 
-    #[test]
-    fn can_use_closure_as_factory() {
+    #[test(tokio::test)]
+    async fn can_use_closure_as_factory() {
         let context = "hello";
-        let pool = Pool::new(10, Box::new(move || AnyObject::with_context(context)));
-        block_on(async {
-            assert_eq!(
-                AnyObject {
-                    member: String::from("hello")
-                },
-                *pool.get().await
-            )
-        })
+        let pool = Pool::new(10, Box::new(move || AnyObject::with_context(context)))
+            .await
+            .unwrap();
+        assert_eq!(
+            AnyObject {
+                member: String::from("hello")
+            },
+            get!(item = pool => item.clone())
+        )
+    }
+
+    struct AsyncFactory {}
+
+    impl AsyncFactory {
+        async fn get_instance(&self) -> AnyObject {
+            AnyObject {
+                member: String::from("hello"),
+            }
+        }
+    }
+
+    impl Factory<AnyObject> for AsyncFactory {
+        fn produce(&mut self) -> Box<dyn Future<Output = AnyObject> + Send + Unpin + '_> {
+            Box::new(Box::pin(self.get_instance()))
+        }
+    }
+
+    #[test(tokio::test)]
+    async fn can_use_async_function_as_factory() {
+        let pool = Pool::new_with_factory(10, AsyncFactory {}).await.unwrap();
+        assert_eq!(
+            AnyObject {
+                member: String::from("hello")
+            },
+            get!(item = pool => item.clone())
+        )
     }
 
     struct AsyncPoolHolder {
@@ -314,82 +353,97 @@ mod tests {
     }
 
     impl AsyncPoolHolder {
-        fn new() -> Self {
+        async fn new() -> Self {
             Self {
-                pool: Pool::new(3, Box::new(|| AnyObject::new())),
+                pool: Pool::new(3, Box::new(|| AnyObject::new())).await.unwrap(),
             }
         }
 
-        fn get_member_value(self) -> Vec<String> {
+        async fn get_member_value(self) -> Vec<String> {
             let mut values = vec![];
-            block_on(async {
-                let object_1 = self.pool.get().await;
-                let object_2 = self.pool.get().await;
-                let object_3 = self.pool.get().await;
-                values.push(object_1.member.clone());
-                values.push(object_2.member.clone());
-                values.push(object_3.member.clone());
+            get!(object_1 = self.pool => {
+                get!(object_2 = self.pool => {
+                    get!(object_3 = self.pool => {
+                        values.push(object_1.member.clone());
+                        values.push(object_2.member.clone());
+                        values.push(object_3.member.clone());
+                    })
+                })
             });
-            block_on(async {
-                let object_4 = self.pool.get().await;
-                let object_5 = self.pool.get().await;
-                let object_6 = self.pool.get().await;
-                values.push(object_4.member.clone());
-                values.push(object_5.member.clone());
-                values.push(object_6.member.clone());
+            get!(object_4 = self.pool => {
+                get!(object_5 = self.pool => {
+                    get!(object_6 = self.pool => {
+                        values.push(object_4.member.clone());
+                        values.push(object_5.member.clone());
+                        values.push(object_6.member.clone());
+                    })
+                })
             });
             values
         }
     }
 
-    #[test]
-    fn can_run_in_async() {
-        let holder = AsyncPoolHolder::new();
-        let res = holder.get_member_value();
+    #[test(tokio::test)]
+    async fn can_run_in_async() {
+        let holder = AsyncPoolHolder::new().await;
+        let res = holder.get_member_value().await;
         let set: HashSet<String> = HashSet::from_iter(res.iter().cloned());
         assert_eq!(3, set.len())
     }
 
-    #[test]
-    fn can_mutate_polled_items() {
+    #[test(tokio::test)]
+    async fn can_mutate_polled_items() {
         struct Mutable {
             count: i32,
         }
 
-        let pool = Pool::new(2, Box::new(|| Mutable { count: 0 }));
+        let pool = Pool::new(2, Box::new(|| Mutable { count: 0 }))
+            .await
+            .unwrap();
 
-        block_on(async {
-            let mut object = pool.get().await;
-            object.count += 1
+        get!(object = pool => {
+            object.count += 1;
         });
-        block_on(async {
-            let item_1 = pool.get().await;
-            let item_2 = pool.get().await;
 
-            assert_eq!(1, item_1.count);
-            assert_eq!(0, item_2.count);
+        get!(item_1 = pool => {
+            get!(item_2 = pool => {
+                assert_eq!(1, item_1.count);
+                assert_eq!(0, item_2.count);
+            })
         })
     }
 
-    #[test]
-    fn marking_item_as_tainted_drops_it_from_pool() {
-        let pool = Pool::new(1, Box::new(AnyObject::new));
+    #[test(tokio::test)]
+    async fn marking_item_as_tainted_drops_it_from_pool() {
+        let pool = Pool::new(1, Box::new(AnyObject::new)).await.unwrap();
 
-        block_on(async {
-            let mut item_val = String::new();
-            {
-                let item = pool.get().await;
-                item_val += &item.member;
-            }
-            {
-                let mut item = pool.get().await;
-                assert!(item_val == item.member);
-                Pooled::tainted(&mut item);
-            }
-            {
-                let item = pool.get().await;
-                assert!(item_val != item.member);
-            }
+        let mut item_val = String::new();
+        get!(item = pool => {
+            item_val += &item.member;
         });
+        get!(item = pool => {
+            assert!(item_val == item.member);
+            Pooled::tainted(&mut item);
+        });
+        get!(item = pool => {
+            assert!(item_val != item.member);
+        });
+    }
+
+    #[test(tokio::test)]
+    async fn can_run_in_multi_task_mode() {
+        let pool = Arc::new(Pool::new(1, Box::new(AnyObject::new)).await.unwrap());
+        let mut join_set = JoinSet::new();
+        for _ in 0..10 {
+            let local_pool = pool.clone();
+            join_set.spawn(async move {
+                get!(item = local_pool => {
+                    println!("{}", item.member);
+                });
+            });
+        }
+        while !join_set.is_empty() {
+            join_set.join_next().await;
+        }
     }
 }
