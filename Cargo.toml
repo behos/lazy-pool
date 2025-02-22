@@ -6,7 +6,7 @@ description = "Experimental lazy object pool"
 repository = "https://github.com/behos/lazy-pool"
 license = "Apache-2.0"
 readme = "./README.md"
-edition = "2021"
+edition = "2024"
 
 [dependencies]
 log = "~0"
